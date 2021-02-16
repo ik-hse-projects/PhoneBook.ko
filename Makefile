@@ -10,7 +10,7 @@ default: $(BUILD_DIR_MAKEFILE)
 	make -C $(KDIR) M=$(BUILD_DIR) src=$(PWD) modules
 
 modules_install: $(BUILD_DIR_MAKEFILE)
-	make -C $(KDIR) M=$(BUILD_DIR) src=$(PWD) modules_install $@
+	make -C $(KDIR) M=$(BUILD_DIR) src=$(PWD) modules_install INSTALL_MOD_PATH=$(BUILDS)/initramfs
 
 $(BUILD_DIR):
 	mkdir -p "$@"
