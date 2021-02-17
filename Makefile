@@ -1,5 +1,6 @@
 ifneq ($(KERNELRELEASE),)
 obj-m += phonebook.o
+CFLAGS_phonebook.o := -O0
 else
 
 KDIR ?= $(LINUX_BUILD)
