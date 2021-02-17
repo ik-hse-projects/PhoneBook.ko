@@ -9,6 +9,7 @@ MODULE_LICENSE("GPL");
 int major_num;
 
 struct phonebook_user {
+    int id;
     char *name;
     char *surname;
     char *email;
@@ -30,6 +31,8 @@ struct phonebook_content {
     struct phonebook_user user;
     struct list_head list;
 } phonebook_content;
+
+DEFINE_IDA(phonebook_ida);
 
 static void free_request(void) {
     if (phonebook_request.start != NULL) {
@@ -110,6 +113,7 @@ static void add_user(void) {
         fields[i] = field;
     }
     struct phonebook_user user = {
+            .id = ida_alloc(&phonebook_ida, GFP_KERNEL),
             .surname = fields[0],
             .name = fields[1],
             .email = fields[2],
@@ -120,9 +124,8 @@ static void add_user(void) {
         return;
     }
 
-    char *buf = sprintf_alloc("Surname: %s\nName: %s\nEmail: %s\nPhone: %s\nAge: %ld\n",
-                              user.surname, user.name, user.email, user.phone, user.age);
-    set_response(buf);
+    set_response(sprintf_alloc("Id:%d\nSurname: %s\nName: %s\nEmail: %s\nPhone: %s\nAge: %ld\n",
+                               user.id, user.surname, user.name, user.email, user.phone, user.age));
 
     struct phonebook_content *added_user = kmalloc(sizeof(struct phonebook_content), GFP_KERNEL);
     if (added_user == NULL) {
@@ -134,14 +137,19 @@ static void add_user(void) {
 }
 
 static void del_user(void) {
-    char *surname = strsep(&phonebook_request.start, "\n");
+    char *id_text = strsep(&phonebook_request.start, "\n");
+    int id;
+    if (kstrtoint(id_text, 10, &id) != 0) {
+        static_response("Invalid id given.\n");
+        return;
+    }
     struct list_head *pos = NULL;
     struct list_head *tmp;
     int counter = 0;
     list_for_each_safe(pos, tmp, &phonebook_content.list) {
         struct phonebook_content *user = list_entry(pos, struct phonebook_content, list);
 
-        if (strcmp(user->user.surname, surname) == 0) {
+        if (user->user.id == id) {
             list_del(pos);
             kfree(user);
             counter++;
