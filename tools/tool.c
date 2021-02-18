@@ -68,6 +68,6 @@ int main(int argc, char** argv)
 		int bytes_read = CHECK(read(fd, buf, size), "read");
 		CHECK(close(fd), "close");
 
-		write(1, buf, bytes_read);
+		write(2, buf, bytes_read);
 	}
 }

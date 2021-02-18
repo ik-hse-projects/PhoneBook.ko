@@ -78,7 +78,10 @@ static ssize_t device_read(struct file *flip, char *buffer, size_t len, loff_t *
     char **src;
     size_t available;
     int free;
-    if (phonebook_response.start == 0) {
+    if (phonebook_response.start == NULL) {
+        if (phonebook_request.start == NULL) {
+            return 0;
+        }
         // For debugging mostly.
         available = phonebook_request.len - (*offset);
         src = &phonebook_request.start;
@@ -121,6 +124,13 @@ static char *format_user(struct phonebook_user user) {
                          user.id, user.surname, user.name, user.email, user.phone, user.age);
 }
 
+static char* copy_string(char* s) {
+    int len = strlen(s) + 1;
+    char* buf = kmalloc(len, GFP_KERNEL);
+    memcpy(buf, s, len);
+    return buf;
+}
+
 static void add_user(void) {
     char *fields[5];
     int i;
@@ -134,10 +144,10 @@ static void add_user(void) {
     }
     struct phonebook_user user = {
             .id = ida_alloc(&phonebook_ida, GFP_KERNEL),
-            .surname = fields[0],
-            .name = fields[1],
-            .email = fields[2],
-            .phone = fields[3],
+            .surname = copy_string(fields[0]),
+            .name = copy_string(fields[1]),
+            .email = copy_string(fields[2]),
+            .phone = copy_string(fields[3]),
     };
     if (kstrtol(fields[4], 10, &user.age) != 0) {
         set_response(static_to_alloc("Invalid age given.\n"));
@@ -174,6 +184,9 @@ static void del_user(void) {
 
         if (user->user.id == id) {
             list_del(pos);
+            kfree(user->user.name);
+            kfree(user->user.surname);
+            kfree(user->user.email);
             kfree(user);
             counter++;
         }
@@ -206,6 +219,7 @@ static void handle_request(void) {
         return;
     }
 
+    char *request_start = phonebook_request.start;
     char *command = strsep(&phonebook_request.start, "\n");
     if (strcmp(command, "ADD") == 0) {
         add_user();
@@ -217,16 +231,24 @@ static void handle_request(void) {
         set_response(static_to_alloc("Unknown command\n"));
     }
 
+    phonebook_request.start = request_start;
     free_request();
 }
 
-static ssize_t device_write(struct file *flip, const char *buffer, size_t len, loff_t *offset) {
-    if (buffer == NULL) {
+static ssize_t device_write(struct file *flip, const char *user_buffer, size_t len, loff_t *offset) {
+    if (user_buffer == NULL) {
         return -EINVAL;
     }
     if (len == 0) {
         return 0;
     }
+
+    char *buffer = kmalloc(len, GFP_KERNEL);
+    if (buffer == 0) {
+        free_request();
+        return -ENOMEM;
+    }
+    copy_from_user(buffer, user_buffer, len);
 
     size_t input_len = strnlen(buffer, len);
 
@@ -254,6 +276,8 @@ static ssize_t device_write(struct file *flip, const char *buffer, size_t len, l
     if (buffer[input_len - 1] == '\0') {
         handle_request();
     }
+
+    // FIXME: buffer leaks
 
     return input_len;
 }
