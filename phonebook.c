@@ -19,7 +19,6 @@ struct phonebook_user {
 
 struct phonebook_response {
     char *start;
-    size_t position;
 } phonebook_response;
 
 struct phonebook_request {
@@ -44,54 +43,70 @@ static void free_request(void) {
 
 static void set_response(char *s) {
     phonebook_response.start = s;
-    phonebook_response.position = 0;
 }
 
-static void static_response(char *s) {
-    size_t len = strlen(s);
-    char *copied = kmalloc_array(len, sizeof(char), GFP_KERNEL);
-    if (copied == 0) {
-        return;
+static void append_response(char *s) {
+    int old_len = phonebook_response.start == NULL ? 0 : strlen(phonebook_response.start);
+    int add_len = strlen(s);
+    int new_len = old_len + add_len + 1;
+    char *new_response = kmalloc(new_len, GFP_KERNEL);
+
+    if (phonebook_response.start != NULL) {
+        memcpy(new_response, phonebook_response.start, old_len);
+        kfree(phonebook_response.start);
     }
+
+    memcpy(new_response + old_len, s, add_len);
+    kfree(s);
+
+    new_response[new_len - 1] = 0;
+    phonebook_response.start = new_response;
+    BUG_ON(strlen(phonebook_response.start) != (old_len + add_len));
+}
+
+static char *static_to_alloc(char *s) {
+    size_t len = strlen(s) + 1;
+    char *copied = kmalloc(len, GFP_KERNEL);
     memcpy(copied, s, len);
-    set_response(copied);
+    return copied;
 }
 
 static ssize_t device_read(struct file *flip, char *buffer, size_t len, loff_t *offset) {
     if (buffer == 0) {
         return -EINVAL;
     }
+    char **src;
+    size_t available;
+    int free;
     if (phonebook_response.start == 0) {
-        // For debugging.
-        if (phonebook_request.len <= *offset) {
-            return 0;
-        }
-        size_t remaining = phonebook_request.len - (*offset);
-        int to_read = min(len, remaining);
-        int i;
-        for (i = 0; i < to_read; i++) {
-            put_user(phonebook_request.start[*offset], buffer++);
-            (*offset)++;
-        }
-        return to_read;
+        // For debugging mostly.
+        available = phonebook_request.len - (*offset);
+        src = &phonebook_request.start;
+        free = false;
+    } else {
+        available = strlen(phonebook_response.start);
+        src = &phonebook_response.start;
+        free = true;
     }
-    {
-        int bytes_read = 0;
-        while (len) {
-            char ch = phonebook_response.start[phonebook_response.position++];
-            if (ch == 0) {
-                kfree(phonebook_response.start);
-                phonebook_response.start = 0;
-                phonebook_response.position = 0;
-                break;
-            }
-            put_user(ch, buffer++);
-            len--;
-            (*offset)++;
-            bytes_read++;
-        }
-        return bytes_read;
+    if (available < *offset) {
+        return 0;
     }
+    available -= *offset;
+    int to_read = min(available, len);
+    int i;
+    char *position = (*src) + (*offset);
+    for (i = 0; i < to_read; i++) {
+        int res = put_user(*(position++), buffer++);
+        if (res < 0) {
+            return res;
+        }
+        (*offset)++;
+    }
+    if (free) {
+        kfree(*src);
+        *src = NULL;
+    }
+    return to_read;
 }
 
 #define sprintf_alloc(args...) ({             \
@@ -101,13 +116,18 @@ static ssize_t device_read(struct file *flip, char *buffer, size_t len, loff_t *
      buf;                                     \
 })
 
+static char *format_user(struct phonebook_user user) {
+    return sprintf_alloc("Id:%d\nSurname: %s\nName: %s\nEmail: %s\nPhone: %s\nAge: %ld\n",
+                         user.id, user.surname, user.name, user.email, user.phone, user.age);
+}
+
 static void add_user(void) {
     char *fields[5];
     int i;
     for (i = 0; i < 5; i++) {
         char *field = strsep(&phonebook_request.start, "\n");
         if (field == NULL) {
-            static_response("Expected 5 lines.\n");
+            set_response(static_to_alloc("Expected 5 lines.\n"));
             return;
         }
         fields[i] = field;
@@ -120,16 +140,15 @@ static void add_user(void) {
             .phone = fields[3],
     };
     if (kstrtol(fields[4], 10, &user.age) != 0) {
-        static_response("Invalid age given.\n");
+        set_response(static_to_alloc("Invalid age given.\n"));
         return;
     }
 
-    set_response(sprintf_alloc("Id:%d\nSurname: %s\nName: %s\nEmail: %s\nPhone: %s\nAge: %ld\n",
-                               user.id, user.surname, user.name, user.email, user.phone, user.age));
+    set_response(format_user(user));
 
     struct phonebook_content *added_user = kmalloc(sizeof(struct phonebook_content), GFP_KERNEL);
     if (added_user == NULL) {
-        static_response("OOM.\n");
+        set_response(static_to_alloc("OOM.\n"));
         return;
     }
     added_user->user = user;
@@ -138,9 +157,13 @@ static void add_user(void) {
 
 static void del_user(void) {
     char *id_text = strsep(&phonebook_request.start, "\n");
+    if (id_text == NULL) {
+        set_response(static_to_alloc("One argument expected.\n"));
+        return;
+    }
     int id;
     if (kstrtoint(id_text, 10, &id) != 0) {
-        static_response("Invalid id given.\n");
+        set_response(static_to_alloc("Invalid id given.\n"));
         return;
     }
     struct list_head *pos = NULL;
@@ -158,6 +181,26 @@ static void del_user(void) {
     set_response(sprintf_alloc("Deleted %d matching users\n", counter));
 }
 
+static void find_phonebook_user(void) {
+    char *surname = strsep(&phonebook_request.start, "\n");
+    if (surname == NULL) {
+        set_response(static_to_alloc("One argument expected.\n"));
+        return;
+    }
+    struct list_head *pos = NULL;
+    set_response(static_to_alloc("Search results:"));
+    list_for_each(pos, &phonebook_content.list) {
+        struct phonebook_content *user = list_entry(pos, struct phonebook_content, list);
+
+        if (strcmp(user->user.surname, surname) == 0) {
+            // Amazingly inefficient...
+            append_response(static_to_alloc("\n"));
+            append_response(format_user(user->user));
+        }
+    }
+    append_response(static_to_alloc("\nEnd\n"));
+}
+
 static void handle_request(void) {
     if (phonebook_request.start == NULL) {
         return;
@@ -168,8 +211,10 @@ static void handle_request(void) {
         add_user();
     } else if (strcmp(command, "DEL") == 0) {
         del_user();
+    } else if (strcmp(command, "FIND") == 0) {
+        find_phonebook_user();
     } else {
-        static_response("Unknown command\n");
+        set_response(static_to_alloc("Unknown command\n"));
     }
 
     free_request();
